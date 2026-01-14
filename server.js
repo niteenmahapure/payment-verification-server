@@ -1,91 +1,82 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const fs = require('fs');
 const path = require('path');
-const initSqlJs = require('sql.js');
+const fs = require('fs');
 
 const app = express();
+const PORT = process.env.PORT || 3000;
+
+/* ---------- Middleware ---------- */
 app.use(cors());
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.urlencoded({ extended: true }));
 
-const upload = multer({ dest: 'uploads/' });
-
-let db;
-const DB_FILE = 'payments.sqlite';
-
-/* ---------- INIT SQLITE (WASM) ---------- */
-initSqlJs().then(SQL => {
-  if (fs.existsSync(DB_FILE)) {
-    const filebuffer = fs.readFileSync(DB_FILE);
-    db = new SQL.Database(filebuffer);
-  } else {
-    db = new SQL.Database();
-    db.run(`
-      CREATE TABLE payments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        client TEXT,
-        phone TEXT,
-        amount TEXT,
-        rm TEXT,
-        screenshot TEXT,
-        status TEXT DEFAULT 'Pending',
-        created_at TEXT
-      )
-    `);
-    saveDB();
-  }
-  console.log('✅ sql.js database ready');
-});
-
-function saveDB() {
-  const data = db.export();
-  fs.writeFileSync(DB_FILE, Buffer.from(data));
+/* ---------- Uploads Folder ---------- */
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
 }
 
-/* ---------- ROUTES ---------- */
+app.use('/uploads', express.static(uploadDir));
 
+/* ---------- Multer Setup ---------- */
+const storage = multer.diskStorage({
+  destination: uploadDir,
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + '-' + file.originalname);
+  }
+});
+
+const upload = multer({ storage });
+
+/* ---------- In-Memory Storage (TEMP) ---------- */
+let payments = [];
+
+/* ---------- Routes ---------- */
+
+// Health check (VERY IMPORTANT for Render)
 app.get('/', (req, res) => {
-  res.send('Payment Verification Server is running');
+  res.send('Payment Verification Server is running ✅');
 });
 
+// Get all payments
 app.get('/payments', (req, res) => {
-  const stmt = db.prepare(`SELECT * FROM payments ORDER BY id DESC`);
-  const rows = [];
-  while (stmt.step()) rows.push(stmt.getAsObject());
-  stmt.free();
-  res.json(rows);
+  res.json(payments);
 });
 
-app.post('/submit', upload.single('screenshot'), (req, res) => {
-  const { client, phone, amount, rm } = req.body;
-  const screenshot = req.file ? req.file.filename : null;
+// Submit payment
+app.post('/payments', upload.single('screenshot'), (req, res) => {
+  const { name, phone, amount, rm } = req.body;
 
-  db.run(
-    `INSERT INTO payments (client, phone, amount, rm, screenshot, status, created_at)
-     VALUES (?, ?, ?, ?, ?, 'Pending', datetime('now'))`,
-    [client, phone, amount, rm, screenshot]
-  );
+  const payment = {
+    id: Date.now(),
+    name,
+    phone,
+    amount,
+    rm,
+    status: 'Pending',
+    screenshot: req.file ? `/uploads/${req.file.filename}` : null,
+    createdAt: new Date()
+  };
 
-  saveDB();
+  payments.unshift(payment);
+  res.json({ success: true, payment });
+});
+
+// Update status
+app.put('/payments/:id', (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  const payment = payments.find(p => p.id == id);
+  if (!payment) return res.status(404).json({ error: 'Not found' });
+
+  payment.status = status;
   res.json({ success: true });
 });
 
-app.post('/update', (req, res) => {
-  const { id, client, phone, amount, rm, status } = req.body;
-
-  db.run(
-    `UPDATE payments SET client=?, phone=?, amount=?, rm=?, status=? WHERE id=?`,
-    [client, phone, amount, rm, status, id]
-  );
-
-  saveDB();
-  res.json({ success: true });
-});
-
-/* ---------- START SERVER ---------- */
-const PORT = process.env.PORT || 3000;
+/* ---------- Start Server ---------- */
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
